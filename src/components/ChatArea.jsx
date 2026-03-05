@@ -30,12 +30,17 @@ function ChatArea({
   currentConversation,
   selectedModel,
   onModelChange,
+  toolCallModel,
+  onToolCallModelChange,
+  useToolModelForFirstRound,
+  onUseToolModelForFirstRoundChange,
   onSendSuccess,
   onNewConversationCreated,
   onConversationListChange,
 }) {
   const [models, setModels] = useState([]);
   const [modelOpen, setModelOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [inputValue, setInputValue] = useState("");
   const [sending, setSending] = useState(false);
   const [optimisticUserMessage, setOptimisticUserMessage] = useState(null);
@@ -46,6 +51,8 @@ function ChatArea({
   const textareaRef = useRef(null);
   const dropdownRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const settingsBtnRef = useRef(null);
+  const modalContentRef = useRef(null);
 
   const baseMessages = (currentConversation?.messages ?? []).map((m) => ({
     role: m.role,
@@ -75,8 +82,11 @@ function ChatArea({
       if (mapped.length > 0 && (!selectedModel || !mapped.some((m) => m.id === selectedModel || m.name === selectedModel))) {
         onModelChange(mapped[0].id);
       }
+      if (toolCallModel && !mapped.some((m) => m.id === toolCallModel || m.name === toolCallModel)) {
+        onToolCallModelChange?.(null);
+      }
     }).catch(() => setModels([]));
-  }, [selectedModel, onModelChange]);
+  }, [selectedModel, onModelChange, toolCallModel, onToolCallModelChange]);
 
   useEffect(() => {
     const ta = textareaRef.current;
@@ -98,6 +108,54 @@ function ChatArea({
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [displayMessages, streamingContent, sendError]);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const handleEscape = (e) => {
+      if (e.key === "Escape") setSettingsOpen(false);
+    };
+    document.addEventListener("keydown", handleEscape);
+    return () => document.removeEventListener("keydown", handleEscape);
+  }, [settingsOpen]);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev || "";
+    };
+  }, [settingsOpen]);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const el = modalContentRef.current;
+    if (!el) return;
+    const focusable = el.querySelectorAll('select, button, input, [href]');
+    const focusableList = Array.from(focusable);
+    const first = focusableList[0];
+    const t = first ? setTimeout(() => first.focus(), 0) : null;
+    const handleKeyDown = (e) => {
+      if (e.key !== "Tab") return;
+      const current = document.activeElement;
+      const idx = focusableList.indexOf(current);
+      if (idx === -1) return;
+      e.preventDefault();
+      if (e.shiftKey) {
+        const nextIdx = idx <= 0 ? focusableList.length - 1 : idx - 1;
+        focusableList[nextIdx]?.focus();
+      } else {
+        const nextIdx = idx >= focusableList.length - 1 ? 0 : idx + 1;
+        focusableList[nextIdx]?.focus();
+      }
+    };
+    el.addEventListener("keydown", handleKeyDown);
+    return () => {
+      if (t) clearTimeout(t);
+      el.removeEventListener("keydown", handleKeyDown);
+      settingsBtnRef.current?.focus();
+    };
+  }, [settingsOpen]);
 
   const handleSend = useCallback(async () => {
     if (!hasInput || sending) return;
@@ -138,6 +196,10 @@ function ChatArea({
 
     try {
       if (toolsEnabled) {
+        const effectiveToolModel =
+          toolCallModel && models.some((m) => m.id === toolCallModel || m.name === toolCallModel)
+            ? toolCallModel
+            : undefined;
         const chatMessages = currentConversation
           ? (currentConversation.messages || []).map((m) => ({ role: m.role, content: m.content || m.text })).concat([{ role: "user", content }])
           : [{ role: "user", content }];
@@ -162,7 +224,8 @@ function ChatArea({
                 clearSendingState();
                 onConversationListChange?.();
               },
-            }
+            },
+            { toolModel: effectiveToolModel, useToolModelForFirstRound: useToolModelForFirstRound || false }
           );
         } else {
           await api.addMessage(currentConversation.id, "user", content);
@@ -185,7 +248,8 @@ function ChatArea({
                 onSendSuccess?.();
                 onConversationListChange?.();
               },
-            }
+            },
+            { toolModel: effectiveToolModel, useToolModelForFirstRound: useToolModelForFirstRound || false }
           );
         }
         return;
@@ -243,6 +307,9 @@ function ChatArea({
     inputValue,
     currentConversation,
     effectiveModel,
+    models,
+    toolCallModel,
+    useToolModelForFirstRound,
     onSendSuccess,
     onNewConversationCreated,
     onConversationListChange,
@@ -266,6 +333,7 @@ function ChatArea({
   return (
     <main className="chat-area" role="main">
       <div className="chat-area__topbar">
+        <div className="chat-area__topbar-spacer" aria-hidden="true" />
         <div className="chat-area__model-picker" ref={dropdownRef}>
           <button
             className="chat-area__model-btn"
@@ -307,7 +375,83 @@ function ChatArea({
             </div>
           )}
         </div>
+        <div className="chat-area__topbar-actions">
+          <button
+            ref={settingsBtnRef}
+            type="button"
+            className="chat-area__settings-btn"
+            onClick={() => setSettingsOpen(true)}
+            aria-label="Open settings"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1Z" />
+            </svg>
+          </button>
+        </div>
       </div>
+
+      {settingsOpen && (
+        <div
+          className="chat-area__settings-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="chat-area__settings-title"
+        >
+          <div
+            className="chat-area__settings-modal-backdrop"
+            onClick={() => setSettingsOpen(false)}
+          />
+          <div ref={modalContentRef} className="chat-area__settings-modal-content" tabIndex={-1}>
+            <h2 id="chat-area__settings-title" className="chat-area__settings-modal-title">
+              Settings
+            </h2>
+            <div className="chat-area__settings-field">
+              <label htmlFor="chat-area__tool-call-model" className="chat-area__settings-label">
+                Model for tool calls
+              </label>
+              <select
+                id="chat-area__tool-call-model"
+                className="chat-area__settings-select"
+                value={toolCallModel ?? ""}
+                onChange={(e) => onToolCallModelChange?.(e.target.value === "" ? null : e.target.value)}
+                aria-label="Model for tool calls"
+              >
+                <option value="">Same as conversation</option>
+                {models.map((m) => (
+                  <option key={m.id} value={m.id ?? m.name}>
+                    {m.name}
+                  </option>
+                ))}
+              </select>
+              <p className="chat-area__settings-hint">
+                Used for tool steps after your first reply when tools are enabled.
+              </p>
+            </div>
+            {toolCallModel && (
+              <div className="chat-area__settings-field">
+                <label className="chat-area__settings-checkbox-label">
+                  <input
+                    type="checkbox"
+                    className="chat-area__settings-checkbox"
+                    checked={useToolModelForFirstRound ?? false}
+                    onChange={(e) => onUseToolModelForFirstRoundChange?.(e.target.checked)}
+                    aria-label="Use tool-call model for first reply when tools are enabled"
+                  />
+                  <span>Use tool-call model for first reply when tools are enabled</span>
+                </label>
+              </div>
+            )}
+            <button
+              type="button"
+              className="chat-area__settings-modal-close"
+              onClick={() => setSettingsOpen(false)}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
 
       {isEmpty ? (
         <div className="chat-area__empty">

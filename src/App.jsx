@@ -26,6 +26,30 @@ function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [currentConversation, setCurrentConversation] = useState(null);
   const [selectedModel, setSelectedModel] = useState(null);
+  const [toolCallModel, setToolCallModelState] = useState(
+    () => localStorage.getItem("localgpt.toolCallModel") ?? null
+  );
+  const [useToolModelForFirstRound, setUseToolModelForFirstRoundState] = useState(
+    () => localStorage.getItem("localgpt.useToolModelForFirstRound") === "true"
+  );
+
+  const onToolCallModelChange = useCallback((value) => {
+    setToolCallModelState(value);
+    if (value != null && value !== "") {
+      localStorage.setItem("localgpt.toolCallModel", value);
+    } else {
+      localStorage.removeItem("localgpt.toolCallModel");
+    }
+  }, []);
+
+  const onUseToolModelForFirstRoundChange = useCallback((value) => {
+    setUseToolModelForFirstRoundState(value);
+    if (value) {
+      localStorage.setItem("localgpt.useToolModelForFirstRound", "true");
+    } else {
+      localStorage.removeItem("localgpt.useToolModelForFirstRound");
+    }
+  }, []);
 
   const fetchConversations = useCallback(async (q = "") => {
     try {
@@ -101,6 +125,10 @@ function App() {
           currentConversation={currentConversation}
           selectedModel={selectedModel}
           onModelChange={setSelectedModel}
+          toolCallModel={toolCallModel}
+          onToolCallModelChange={onToolCallModelChange}
+          useToolModelForFirstRound={useToolModelForFirstRound}
+          onUseToolModelForFirstRoundChange={onUseToolModelForFirstRoundChange}
           onSendSuccess={handleRefreshCurrent}
           onNewConversationCreated={setCurrentConversation}
           onConversationListChange={handleRefreshList}

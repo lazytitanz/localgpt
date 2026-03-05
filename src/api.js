@@ -127,7 +127,7 @@ export async function chatStreamWithTools(
   { onChunk, onToolCall, onToolResult, onDone },
   options = {}
 ) {
-  const { toolNames, idempotencyKey } = options;
+  const { toolNames, idempotencyKey, toolModel, useToolModelForFirstRound } = options;
   const url = BASE ? `${BASE}/api/chat/stream-with-tools` : "/api/chat/stream-with-tools";
   let res;
   try {
@@ -140,6 +140,8 @@ export async function chatStreamWithTools(
         tools: true,
         ...(Array.isArray(toolNames) && toolNames.length > 0 ? { toolNames } : {}),
         ...(idempotencyKey ? { idempotencyKey } : {}),
+        ...(toolModel != null && toolModel !== "" ? { toolModel } : {}),
+        ...(useToolModelForFirstRound === true ? { useToolModelForFirstRound: true } : {}),
       }),
     });
   } catch (e) {

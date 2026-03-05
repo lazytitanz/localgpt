@@ -293,7 +293,7 @@ function contentFromChunk(obj) {
 
 app.post("/api/chat/stream-with-tools", async (req, res) => {
   try {
-    const { model, messages, tools: toolsEnabled, toolNames, idempotencyKey } = req.body;
+    const { model, messages, tools: toolsEnabled, toolNames, idempotencyKey, toolModel, useToolModelForFirstRound } = req.body;
     if (!model || !Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: "model and messages array required" });
     }
@@ -327,11 +327,16 @@ app.post("/api/chat/stream-with-tools", async (req, res) => {
       round += 1;
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), OLLAMA_ROUND_TIMEOUT_MS);
+      const useToolForFirst = useToolModelForFirstRound === true && toolModel && toolModel.trim();
+      const chosenModel =
+        round === 1
+          ? (useToolForFirst ? toolModel.trim() : model)
+          : (toolModel && toolModel.trim() ? toolModel.trim() : model);
 
       const r = await fetch(`${OLLAMA_BASE}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model, messages: currentMessages, stream: true }),
+        body: JSON.stringify({ model: chosenModel, messages: currentMessages, stream: true }),
         signal: controller.signal,
       });
       clearTimeout(timeoutId);

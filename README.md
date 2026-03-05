@@ -74,13 +74,11 @@ The SQLite database is created automatically at `server/localgpt.db` on first ru
 ## Plans / roadmap
 
 **Tool calling and model behavior**  
-Tool use (web search, image search, etc.) is driven by the same model you chat with. Some models handle the tool-call protocol reliably; others miss the format, drop content after calling tools, or emit invalid JSON. If you see “(No response)” or broken behavior when tools are enabled, try another model or disable tools for that conversation. In the future we may tighten requirements so that tool-capable flows use a model known to handle tool calls well.
+Tool use (web search, image search, etc.) uses a split-model design:
 
-**Possible future: router + executor**  
-A longer-term direction is to split roles instead of asking one model to do everything:
+- **Conversational model** – The one you pick in the main topbar: handles the first reply and general dialogue. Strong at reasoning, coding, tone, and long context; decides when to delegate to tools.
+- **Tool-call specialist** – Optional. In **Settings** (gear icon, top right), you can choose a separate “Model for tool calls” from your Ollama list. That model is used for tool steps (rounds after the first reply). If you leave it as “Same as conversation”, the conversational model is used for every round. The choice is saved in the browser.
+- **Use tool model for first reply** – When a tool-call model is set, a checkbox in Settings lets you use that model for the first reply too when tools are enabled, so one model handles the whole tool flow.
+- **Validator / repair step** – The server tries to repair minor JSON issues in tool calls (e.g. trailing commas) before execution, so small format slips are less likely to break the flow.
 
-- **Conversational model** – The one you “talk to”: strong at reasoning, coding, tone, and long context. Handles the dialogue and decides when to delegate to tools.
-- **Tool-call specialist** – A smaller or dedicated model that is tuned (or constrained) to emit valid, schema-correct tool calls. Used only for the tool step, so it doesn’t need to be best-in-class at general chat.
-- **Validator / repair step** (optional) – A pass that parses and fixes malformed tool calls before execution, so minor format slips don’t break the flow.
-
-That design would make tool use more reliable across a wider set of base models while keeping the main chat experience on the model you prefer.
+If you still see “(No response)” or broken behavior when tools are on, try a different conversational or tool-call model, or disable tools for that chat.

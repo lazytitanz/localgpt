@@ -19,6 +19,34 @@ function findToolCallStart(buffer, searchStart) {
 }
 
 /**
+ * Parse inner JSON of a <tool_call>; on failure try simple repairs (e.g. trailing commas).
+ * @param {string} inner - Trimmed content between <tool_call> and </tool_call>
+ * @returns {{ id?: string, name: string, arguments: Record<string, unknown> } | null}
+ */
+function tryParseToolCallInner(inner) {
+  if (!inner || typeof inner !== "string") return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(inner);
+  } catch (_) {
+    const repaired = inner.replace(/,(\s*[}\]])/g, "$1");
+    try {
+      parsed = JSON.parse(repaired);
+    } catch (_) {
+      return null;
+    }
+  }
+  const name = typeof parsed?.name === "string" ? parsed.name : "";
+  if (!name) return null;
+  const args =
+    parsed && typeof parsed.arguments === "object" && parsed.arguments !== null
+      ? parsed.arguments
+      : {};
+  const id = typeof parsed?.id === "string" ? parsed.id : undefined;
+  return { id, name, arguments: args };
+}
+
+/**
  * @param {string} buffer - Full assistant message string (accumulated from stream)
  * @param {{ maxBufferBytes?: number }} [opts]
  * @returns {{ textBefore: string, toolCalls: Array<{ id?: string, name: string, arguments: Record<string, unknown> }>, remainder: string, bufferExceeded?: boolean }}
@@ -71,18 +99,9 @@ export function parseToolCalls(buffer, opts = {}) {
     }
 
     const inner = buffer.slice(startIndex + tagLength, endIndex).trim();
-    try {
-      const parsed = JSON.parse(inner);
-      const name = typeof parsed?.name === "string" ? parsed.name : "";
-      const args = parsed && typeof parsed.arguments === "object" && parsed.arguments !== null
-        ? parsed.arguments
-        : {};
-      const id = typeof parsed?.id === "string" ? parsed.id : undefined;
-      if (name) {
-        toolCalls.push({ id, name, arguments: args });
-      }
-    } catch (_) {
-      // Invalid JSON: treat as text, don't add to toolCalls
+    const parsed = tryParseToolCallInner(inner);
+    if (parsed) {
+      toolCalls.push(parsed);
     }
 
     searchStart = endIndex + CLOSE_TAG.length;
