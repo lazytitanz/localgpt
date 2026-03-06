@@ -37,7 +37,7 @@ Remember, you MUST browse (using the web tool) if the query relates to current e
 When you use information from the web tool, cite the source at the end of each paragraph that used that source. Use this exact markdown format: a space, then [Source: Short Name](url) where url is the exact URL from the web results and Short Name is the site or publication name (e.g. PlayStation, Reddit). Put one such citation at the end of each paragraph that draws from that source.`;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
 
 const dbPath = join(__dirname, "localgpt.db");
 const db = new Database(dbPath);

@@ -17,6 +17,26 @@ function stripMarkdownImages(text) {
   return text.replace(/!\[[^\]]*\]\([^)]+\)/g, "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+/** Parse stored user message content into display text and attachment names (for ChatGPT-style display). */
+function parseUserMessageContent(content) {
+  if (!content || typeof content !== "string") return { displayText: "", attachmentNames: [] };
+  const idx = content.indexOf("[Attached:");
+  if (idx === -1) return { displayText: content.trim(), attachmentNames: [] };
+  const displayText = content.slice(0, idx).trim();
+  const attachmentNames = [];
+  const re = /\[Attached: ([^\]]+)\]/g;
+  let match;
+  while ((match = re.exec(content)) !== null) {
+    attachmentNames.push(match[1].trim());
+  }
+  return { displayText, attachmentNames };
+}
+
+const FILE_ACCEPT =
+  ".txt,.md,.markdown,.rst,.log,.csv,.py,.js,.ts,.jsx,.tsx,.c,.cpp,.h,.hpp,.cc,.cxx,.cs,.java,.kt,.kts,.go,.rs,.rb,.php,.swift,.m,.scala,.r,.sql,.sh,.bash,.zsh,.ps1,.yaml,.yml,.json,.xml,.html,.htm,.css,.scss,.sass,.vue,.svelte";
+const MAX_FILE_BYTES = 1024 * 1024; // 1 MB per file
+const MAX_TOTAL_ATTACHMENT_BYTES = 3 * 1024 * 1024; // 3 MB total
+
 function AssistantIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -48,20 +68,36 @@ function ChatArea({
   const [toolsEnabled, setToolsEnabled] = useState(false);
   const [toolEvents, setToolEvents] = useState([]);
   const [sendError, setSendError] = useState(null);
+  const [attachments, setAttachments] = useState([]);
+  const [attachmentError, setAttachmentError] = useState(null);
   const textareaRef = useRef(null);
   const dropdownRef = useRef(null);
   const messagesEndRef = useRef(null);
   const settingsBtnRef = useRef(null);
   const modalContentRef = useRef(null);
+  const fileInputRef = useRef(null);
 
-  const baseMessages = (currentConversation?.messages ?? []).map((m) => ({
-    role: m.role,
-    text: m.content ?? m.text ?? "",
-    typing: false,
-  }));
+  const baseMessages = (currentConversation?.messages ?? []).map((m) => {
+    const role = m.role;
+    const rawContent = m.content ?? m.text ?? "";
+    if (role === "user") {
+      const { displayText, attachmentNames } = parseUserMessageContent(rawContent);
+      return { role, text: displayText, attachmentNames, typing: false };
+    }
+    return { role, text: rawContent, typing: false };
+  });
   const displayMessages = [
     ...baseMessages,
-    ...(optimisticUserMessage ? [{ role: "user", text: optimisticUserMessage, typing: false }] : []),
+    ...(optimisticUserMessage
+      ? [
+          {
+            role: "user",
+            text: optimisticUserMessage.text,
+            attachmentNames: optimisticUserMessage.attachmentNames ?? [],
+            typing: false,
+          },
+        ]
+      : []),
     ...(sending
       ? streamingContent
         ? [{ role: "assistant", text: streamingContent, typing: false }]
@@ -69,8 +105,8 @@ function ChatArea({
       : []),
   ];
   const effectiveModel = currentConversation?.model ?? selectedModel;
-  const isEmpty = !currentConversation && baseMessages.length === 0 && !optimisticUserMessage;
-  const hasInput = inputValue.trim().length > 0;
+  const isEmpty = !currentConversation && baseMessages.length === 0 && optimisticUserMessage == null;
+  const hasInput = inputValue.trim().length > 0 || attachments.length > 0;
 
   const currentModelLabel = models.find((m) => m.id === effectiveModel || m.name === effectiveModel)?.name ?? effectiveModel ?? "Select model";
 
@@ -157,15 +193,82 @@ function ChatArea({
     };
   }, [settingsOpen]);
 
+  const handleAttachClick = () => {
+    setAttachmentError(null);
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = useCallback((e) => {
+    const files = e.target.files;
+    if (!files?.length) return;
+    const currentTotal = attachments.reduce((sum, a) => sum + (a.content?.length ?? 0) * 2, 0);
+    const toAdd = [];
+    let newTotal = currentTotal;
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (file.size > MAX_FILE_BYTES) {
+        setAttachmentError(`"${file.name}" is too large (max 1 MB per file).`);
+        e.target.value = "";
+        return;
+      }
+      newTotal += file.size;
+      if (newTotal > MAX_TOTAL_ATTACHMENT_BYTES) {
+        setAttachmentError("Total attachments exceed 3 MB.");
+        e.target.value = "";
+        return;
+      }
+      toAdd.push(file);
+    }
+    setAttachmentError(null);
+    let pending = toAdd.length;
+    if (pending === 0) {
+      e.target.value = "";
+      return;
+    }
+    toAdd.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const content = ev.target?.result;
+        if (typeof content !== "string") {
+          setAttachmentError(`"${file.name}" could not be read as text.`);
+          return;
+        }
+        const id = `${file.name}-${file.size}-${file.lastModified}`;
+        setAttachments((prev) => [...prev, { id, name: file.name, content }]);
+        pending -= 1;
+        if (pending === 0) e.target.value = "";
+      };
+      reader.onerror = () => {
+        setAttachmentError(`Could not read "${file.name}".`);
+        pending -= 1;
+        if (pending === 0) e.target.value = "";
+      };
+      reader.readAsText(file, "UTF-8");
+    });
+  }, [attachments]);
+
+  const removeAttachment = (id) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+    setAttachmentError(null);
+  };
+
   const handleSend = useCallback(async () => {
     if (!hasInput || sending) return;
-    const content = inputValue.trim();
+    const typedText = inputValue.trim();
+    const attachmentBlocks = attachments
+      .map((a) => `[Attached: ${a.name}]\n\n${a.content}`)
+      .filter((s) => s.trim().length > 0);
+    const content = [typedText, ...attachmentBlocks].filter(Boolean).join("\n\n");
     setInputValue("");
-    setOptimisticUserMessage(content);
+    setOptimisticUserMessage({
+      text: typedText,
+      attachmentNames: attachments.map((a) => a.name),
+    });
     setSending(true);
     setStreamingContent("");
     setToolEvents([]);
     setSendError(null);
+    setAttachmentError(null);
 
     const clearSendingState = () => {
       setSending(false);
@@ -179,7 +282,8 @@ function ChatArea({
         const assistantContent = (replyContent ?? "").trim() || "(No response)";
         await api.addMessage(convId, "assistant", assistantContent);
         if (isNew) {
-          const titleData = await api.generateTitle(content, assistantContent, effectiveModel);
+          const titlePrompt = content.slice(0, 300);
+          const titleData = await api.generateTitle(titlePrompt, assistantContent, effectiveModel);
           const title = (titleData.title || "New conversation").slice(0, 100);
           await api.updateConversation(convId, { title });
           const updated = await api.getConversation(convId);
@@ -222,6 +326,7 @@ function ChatArea({
                 }
                 if (text != null) await persistStreamedReply(conv.id, text, true);
                 clearSendingState();
+                setAttachments([]);
                 onConversationListChange?.();
               },
             },
@@ -245,6 +350,7 @@ function ChatArea({
                 }
                 if (text != null) await persistStreamedReply(currentConversation.id, text, false);
                 clearSendingState();
+                setAttachments([]);
                 onSendSuccess?.();
                 onConversationListChange?.();
               },
@@ -270,6 +376,7 @@ function ChatArea({
               setSendError("Something went wrong. Please try again.");
             }
             clearSendingState();
+            setAttachments([]);
           }
         );
       } else {
@@ -290,13 +397,14 @@ function ChatArea({
               setSendError("Something went wrong. Please try again.");
             }
             clearSendingState();
+            setAttachments([]);
           }
         );
       }
     } catch (e) {
       console.error(e);
       setSendError(e?.message || "Something went wrong. Please try again.");
-      setInputValue(content);
+      setInputValue(typedText);
       setOptimisticUserMessage(null);
       setStreamingContent("");
       setSending(false);
@@ -305,6 +413,7 @@ function ChatArea({
     hasInput,
     sending,
     inputValue,
+    attachments,
     currentConversation,
     effectiveModel,
     models,
@@ -332,6 +441,15 @@ function ChatArea({
 
   return (
     <main className="chat-area" role="main">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept={FILE_ACCEPT}
+        multiple
+        className="chat-area__file-input"
+        aria-label="Attach files"
+        onChange={handleFileChange}
+      />
       <div className="chat-area__topbar">
         <div className="chat-area__topbar-spacer" aria-hidden="true" />
         <div className="chat-area__model-picker" ref={dropdownRef}>
@@ -458,6 +576,27 @@ function ChatArea({
           <p className="chat-area__empty-prompt">Where should we begin?</p>
           <div className="chat-area__input-area chat-area__input-area--centered">
             <div className="chat-area__input-box">
+              {attachments.length > 0 && (
+                <div className="chat-area__attachments" aria-label="Attached files">
+                  {attachments.map((a) => (
+                    <span key={a.id} className="chat-area__attachment-chip">
+                      <span className="chat-area__attachment-name" title={a.name}>{a.name}</span>
+                      <button
+                        type="button"
+                        className="chat-area__attachment-remove"
+                        onClick={() => removeAttachment(a.id)}
+                        aria-label={`Remove ${a.name}`}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <line x1="18" y1="6" x2="6" y2="18" />
+                          <line x1="6" y1="6" x2="18" y2="18" />
+                        </svg>
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              {attachmentError && <p className="chat-area__attachment-error" role="alert">{attachmentError}</p>}
               <textarea
                 ref={textareaRef}
                 className="chat-area__textarea"
@@ -479,9 +618,9 @@ function ChatArea({
                     />
                     <span className="chat-area__tools-toggle-label">Tools</span>
                   </label>
-                  <button className="chat-area__tool-btn" type="button" aria-label="Attach file">
+                  <button className="chat-area__tool-btn" type="button" aria-label="Attach file" onClick={handleAttachClick}>
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                      <path d="M12 5v14M5 12h14" />
+                      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
                     </svg>
                   </button>
                 </div>
@@ -507,7 +646,18 @@ function ChatArea({
             {displayMessages.map((msg, i) => (
               <div key={i} className={`message message--${msg.role}`}>
                 {msg.role === "user" ? (
-                  <div className="message__user-bubble">{msg.text}</div>
+                  <div className="message__user-bubble">
+                    {msg.text ? <span>{msg.text}</span> : null}
+                    {msg.attachmentNames?.length ? (
+                      <div className="message__user-attachments" aria-label="Attached files">
+                        {msg.attachmentNames.map((name, j) => (
+                          <span key={j} className="message__user-attachment-chip" title={name}>
+                            {name}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
                 ) : msg.typing ? (
                   <>
                     <div className="message__avatar-wrap" aria-hidden="true">
@@ -667,6 +817,27 @@ function ChatArea({
 
           <div className="chat-area__input-area">
             <div className="chat-area__input-box">
+              {attachments.length > 0 && (
+                <div className="chat-area__attachments" aria-label="Attached files">
+                  {attachments.map((a) => (
+                    <span key={a.id} className="chat-area__attachment-chip">
+                      <span className="chat-area__attachment-name" title={a.name}>{a.name}</span>
+                      <button
+                        type="button"
+                        className="chat-area__attachment-remove"
+                        onClick={() => removeAttachment(a.id)}
+                        aria-label={`Remove ${a.name}`}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <line x1="18" y1="6" x2="6" y2="18" />
+                          <line x1="6" y1="6" x2="18" y2="18" />
+                        </svg>
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              {attachmentError && <p className="chat-area__attachment-error" role="alert">{attachmentError}</p>}
               <textarea
                 ref={textareaRef}
                 className="chat-area__textarea"
@@ -688,7 +859,7 @@ function ChatArea({
                     />
                     <span className="chat-area__tools-toggle-label">Tools</span>
                   </label>
-                  <button className="chat-area__tool-btn" type="button" aria-label="Attach file">
+                  <button className="chat-area__tool-btn" type="button" aria-label="Attach file" onClick={handleAttachClick}>
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                       <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
                     </svg>
