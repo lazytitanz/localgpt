@@ -10,7 +10,7 @@ const tools = new Map();
  * @property {string} name
  * @property {string} description
  * @property {Record<string, string>} parameters - property name -> short description or type
- * @property {(args: Record<string, unknown>) => Promise<string | object>} handler
+ * @property {(args: Record<string, unknown>, context?: object) => Promise<string | object>} handler
  * @property {boolean} [requiresUserConsent]
  * @property {string} [scope] - e.g. "filesystem" | "network" | "db"
  */

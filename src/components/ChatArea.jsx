@@ -81,7 +81,9 @@ function ChatArea({
     const role = m.role;
     const rawContent = m.content ?? m.text ?? "";
     if (role === "user") {
-      const { displayText, attachmentNames } = parseUserMessageContent(rawContent);
+      const hasNewAttachments = Array.isArray(m.attachments) && m.attachments.length > 0;
+      const attachmentNames = hasNewAttachments ? m.attachments.map((a) => a.filename) : parseUserMessageContent(rawContent).attachmentNames;
+      const displayText = hasNewAttachments ? rawContent.trim() : parseUserMessageContent(rawContent).displayText;
       return { role, text: displayText, attachmentNames, typing: false };
     }
     return { role, text: rawContent, typing: false };
@@ -304,6 +306,75 @@ function ChatArea({
           toolCallModel && models.some((m) => m.id === toolCallModel || m.name === toolCallModel)
             ? toolCallModel
             : undefined;
+        const useToolMediatedAttachments = attachments.length > 0;
+        let userContentForStorage = content;
+        let userContentForChat = content;
+        let attachmentIdsForRequest = [];
+        if (useToolMediatedAttachments) {
+          userContentForStorage = typedText || "(no text)";
+          userContentForChat = typedText || "(no text)";
+          const convIdForUpload = currentConversation?.id;
+          if (!convIdForUpload) {
+            const conv = await api.createConversation(effectiveModel);
+            const filesToUpload = attachments.map((a) => new File([a.content], a.name, { type: "text/plain" }));
+            const uploaded = await api.uploadAttachments(conv.id, filesToUpload);
+            attachmentIdsForRequest = uploaded.map((r) => r.id);
+            await api.addMessage(conv.id, "user", userContentForStorage, { attachmentIds: attachmentIdsForRequest });
+            const chatMessages = [{ role: "user", content: userContentForChat }];
+            api.chatStreamWithTools(
+              effectiveModel,
+              chatMessages,
+              {
+                onChunk: (chunk) => setStreamingContent((prev) => prev + chunk),
+                onToolCall: (data) => setToolEvents((prev) => [...prev, { type: "tool_call", data }]),
+                onToolResult: (data) => setToolEvents((prev) => [...prev, { type: "tool_result", data }]),
+                onDone: async (data) => {
+                  const text = data?.fullContent ?? (typeof data === "string" ? data : null);
+                  if (data?.error) {
+                    setSendError(data.error || "Something went wrong. Please try again.");
+                    clearSendingState();
+                    return;
+                  }
+                  if (text != null) await persistStreamedReply(conv.id, text, true);
+                  clearSendingState();
+                  setAttachments([]);
+                  onConversationListChange?.();
+                },
+              },
+              { toolModel: effectiveToolModel, useToolModelForFirstRound: useToolModelForFirstRound || false, attachmentIds: attachmentIdsForRequest }
+            );
+            return;
+          }
+          const filesToUpload = attachments.map((a) => new File([a.content], a.name, { type: "text/plain" }));
+          const uploaded = await api.uploadAttachments(convIdForUpload, filesToUpload);
+          attachmentIdsForRequest = uploaded.map((r) => r.id);
+          await api.addMessage(convIdForUpload, "user", userContentForStorage, { attachmentIds: attachmentIdsForRequest });
+          const chatMessages = (currentConversation.messages || []).map((m) => ({ role: m.role, content: m.content || m.text })).concat([{ role: "user", content: userContentForChat }]);
+          api.chatStreamWithTools(
+            effectiveModel,
+            chatMessages,
+            {
+              onChunk: (chunk) => setStreamingContent((prev) => prev + chunk),
+              onToolCall: (data) => setToolEvents((prev) => [...prev, { type: "tool_call", data }]),
+              onToolResult: (data) => setToolEvents((prev) => [...prev, { type: "tool_result", data }]),
+              onDone: async (data) => {
+                const text = data?.fullContent ?? (typeof data === "string" ? data : null);
+                if (data?.error) {
+                  setSendError(data.error || "Something went wrong. Please try again.");
+                  clearSendingState();
+                  return;
+                }
+                if (text != null) await persistStreamedReply(currentConversation.id, text, false);
+                clearSendingState();
+                setAttachments([]);
+                onSendSuccess?.();
+                onConversationListChange?.();
+              },
+            },
+            { toolModel: effectiveToolModel, useToolModelForFirstRound: useToolModelForFirstRound || false, attachmentIds: attachmentIdsForRequest }
+          );
+          return;
+        }
         const chatMessages = currentConversation
           ? (currentConversation.messages || []).map((m) => ({ role: m.role, content: m.content || m.text })).concat([{ role: "user", content }])
           : [{ role: "user", content }];
@@ -417,6 +488,7 @@ function ChatArea({
     currentConversation,
     effectiveModel,
     models,
+    toolsEnabled,
     toolCallModel,
     useToolModelForFirstRound,
     onSendSuccess,

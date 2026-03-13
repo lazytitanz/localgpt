@@ -42,11 +42,38 @@ export async function deleteConversation(id) {
   }
 }
 
-export async function addMessage(conversationId, role, content) {
+export async function addMessage(conversationId, role, content, options = {}) {
+  const { attachmentIds } = options;
+  const body = { role, content };
+  if (Array.isArray(attachmentIds) && attachmentIds.length > 0) {
+    body.attachmentIds = attachmentIds;
+  }
   return request(`/api/conversations/${conversationId}/messages`, {
     method: "POST",
-    body: JSON.stringify({ role, content }),
+    body: JSON.stringify(body),
   });
+}
+
+/**
+ * Upload files as attachments for a conversation. Returns [{ id, filename, line_count, size_bytes }].
+ * @param {number|string} conversationId
+ * @param {File[]} files
+ */
+export async function uploadAttachments(conversationId, files) {
+  const url = BASE ? `${BASE}/api/conversations/${conversationId}/attachments` : `/api/conversations/${conversationId}/attachments`;
+  const form = new FormData();
+  for (let i = 0; i < files.length; i++) {
+    form.append("files", files[i]);
+  }
+  const res = await fetch(url, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || res.statusText);
+  }
+  return res.json();
 }
 
 export async function getModels() {
@@ -127,7 +154,7 @@ export async function chatStreamWithTools(
   { onChunk, onToolCall, onToolResult, onDone },
   options = {}
 ) {
-  const { toolNames, idempotencyKey, toolModel, useToolModelForFirstRound } = options;
+  const { toolNames, idempotencyKey, toolModel, useToolModelForFirstRound, attachmentIds } = options;
   const url = BASE ? `${BASE}/api/chat/stream-with-tools` : "/api/chat/stream-with-tools";
   let res;
   try {
@@ -142,6 +169,7 @@ export async function chatStreamWithTools(
         ...(idempotencyKey ? { idempotencyKey } : {}),
         ...(toolModel != null && toolModel !== "" ? { toolModel } : {}),
         ...(useToolModelForFirstRound === true ? { useToolModelForFirstRound: true } : {}),
+        ...(Array.isArray(attachmentIds) && attachmentIds.length > 0 ? { attachmentIds } : {}),
       }),
     });
   } catch (e) {

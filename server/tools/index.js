@@ -2,6 +2,7 @@
  * Tool framework: registry, parse, and optional example tool.
  */
 
+import "./fileTools.js";
 import { register, getEnabled, getByName } from "./registry.js";
 import { parseToolCalls, hasCompleteToolCall, looksLikeToolProtocol, looksLikeFabricatedToolResults, stripToolResultsEchoes } from "./parse.js";
 
@@ -140,9 +141,10 @@ register({
  * result is kept as-is (string or object); stringify only when embedding into a message.
  * @param {Array<{ id?: string, name: string, arguments: Record<string, unknown> }>} toolCalls
  * @param {(name: string) => import("./registry.js").ToolDef | undefined} getTool
+ * @param {{ attachmentIds?: number[], db?: import("better-sqlite3").Database }} [context]
  * @returns {{ type: "tool_results", results: Array<{ id?: string, name: string, ok: boolean, result?: string | object, error?: string }> }}
  */
-export async function runToolCalls(toolCalls, getTool = getByName) {
+export async function runToolCalls(toolCalls, getTool = getByName, context = {}) {
   const results = [];
   for (const call of toolCalls) {
     const tool = getTool(call.name);
@@ -151,7 +153,7 @@ export async function runToolCalls(toolCalls, getTool = getByName) {
       continue;
     }
     try {
-      const raw = await tool.handler(call.arguments || {});
+      const raw = await tool.handler(call.arguments || {}, context);
       results.push({ id: call.id, name: call.name, ok: true, result: raw });
     } catch (e) {
       results.push({ id: call.id, name: call.name, ok: false, error: (e && e.message) || String(e) });
