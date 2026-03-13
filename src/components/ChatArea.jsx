@@ -54,6 +54,9 @@ function ChatArea({
   onToolCallModelChange,
   useToolModelForFirstRound,
   onUseToolModelForFirstRoundChange,
+  customProviders = [],
+  onAddCustomProvider,
+  onRemoveCustomProvider,
   onSendSuccess,
   onNewConversationCreated,
   onConversationListChange,
@@ -61,6 +64,9 @@ function ChatArea({
   const [models, setModels] = useState([]);
   const [modelOpen, setModelOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState("general");
+  const [customProviderName, setCustomProviderName] = useState("");
+  const [customProviderKey, setCustomProviderKey] = useState("");
   const [inputValue, setInputValue] = useState("");
   const [sending, setSending] = useState(false);
   const [optimisticUserMessage, setOptimisticUserMessage] = useState(null);
@@ -110,21 +116,39 @@ function ChatArea({
   const isEmpty = !currentConversation && baseMessages.length === 0 && optimisticUserMessage == null;
   const hasInput = inputValue.trim().length > 0 || attachments.length > 0;
 
-  const currentModelLabel = models.find((m) => m.id === effectiveModel || m.name === effectiveModel)?.name ?? effectiveModel ?? "Select model";
+  const combinedModelOptions = [
+    ...models.map((m) => ({ id: m.id ?? m.name, name: m.name })),
+    ...customProviders.map((p) => ({ id: `custom:${p.id}`, name: p.name })),
+  ];
+  const customProviderForRequest =
+    effectiveModel?.startsWith?.("custom:") ? customProviders.find((p) => `custom:${p.id}` === effectiveModel) ?? null : null;
+  const currentModelLabel =
+    effectiveModel?.startsWith?.("custom:")
+      ? customProviders.find((p) => `custom:${p.id}` === effectiveModel)?.name ?? effectiveModel
+      : models.find((m) => m.id === effectiveModel || m.name === effectiveModel)?.name ?? effectiveModel ?? "Select model";
 
   useEffect(() => {
     api.getModels().then((list) => {
       const arr = Array.isArray(list) ? list : [];
       const mapped = arr.map((m) => ({ id: m.name || m.id, name: m.name || m.id }));
       setModels(mapped);
-      if (mapped.length > 0 && (!selectedModel || !mapped.some((m) => m.id === selectedModel || m.name === selectedModel))) {
-        onModelChange(mapped[0].id);
-      }
-      if (toolCallModel && !mapped.some((m) => m.id === toolCallModel || m.name === toolCallModel)) {
-        onToolCallModelChange?.(null);
-      }
     }).catch(() => setModels([]));
-  }, [selectedModel, onModelChange, toolCallModel, onToolCallModelChange]);
+  }, []);
+
+  const combinedModelOptionsForEffect = [
+    ...models.map((m) => ({ id: m.id ?? m.name, name: m.name })),
+    ...customProviders.map((p) => ({ id: `custom:${p.id}`, name: p.name })),
+  ];
+  useEffect(() => {
+    if (combinedModelOptionsForEffect.length === 0) return;
+    const inList = (id) => combinedModelOptionsForEffect.some((o) => o.id === id);
+    if (!selectedModel || !inList(selectedModel)) {
+      onModelChange(combinedModelOptionsForEffect[0].id);
+    }
+    if (toolCallModel && !inList(toolCallModel)) {
+      onToolCallModelChange?.(null);
+    }
+  }, [models, customProviders, selectedModel, onModelChange, toolCallModel, onToolCallModelChange]);
 
   useEffect(() => {
     const ta = textareaRef.current;
@@ -279,13 +303,14 @@ function ChatArea({
       // Do not clear toolEvents here so the last reply keeps showing Tools used, carousel, and Sources
     };
 
+    const titleModelForRequest = effectiveModel?.startsWith?.("custom:") ? (models[0]?.id ?? "llama3.2") : effectiveModel;
     const persistStreamedReply = async (convId, replyContent, isNew) => {
       try {
         const assistantContent = (replyContent ?? "").trim() || "(No response)";
         await api.addMessage(convId, "assistant", assistantContent);
         if (isNew) {
           const titlePrompt = content.slice(0, 300);
-          const titleData = await api.generateTitle(titlePrompt, assistantContent, effectiveModel);
+          const titleData = await api.generateTitle(titlePrompt, assistantContent, titleModelForRequest);
           const title = (titleData.title || "New conversation").slice(0, 100);
           await api.updateConversation(convId, { title });
           const updated = await api.getConversation(convId);
@@ -303,7 +328,7 @@ function ChatArea({
     try {
       if (toolsEnabled) {
         const effectiveToolModel =
-          toolCallModel && models.some((m) => m.id === toolCallModel || m.name === toolCallModel)
+          toolCallModel && combinedModelOptions.some((m) => m.id === toolCallModel)
             ? toolCallModel
             : undefined;
         const useToolMediatedAttachments = attachments.length > 0;
@@ -320,6 +345,9 @@ function ChatArea({
             const uploaded = await api.uploadAttachments(conv.id, filesToUpload);
             attachmentIdsForRequest = uploaded.map((r) => r.id);
             await api.addMessage(conv.id, "user", userContentForStorage, { attachmentIds: attachmentIdsForRequest });
+            const fullConv = await api.getConversation(conv.id);
+            onNewConversationCreated(fullConv);
+            onConversationListChange?.();
             const chatMessages = [{ role: "user", content: userContentForChat }];
             api.chatStreamWithTools(
               effectiveModel,
@@ -381,6 +409,9 @@ function ChatArea({
         if (!currentConversation) {
           const conv = await api.createConversation(effectiveModel);
           await api.addMessage(conv.id, "user", content);
+          const fullConv = await api.getConversation(conv.id);
+          onNewConversationCreated(fullConv);
+          onConversationListChange?.();
           api.chatStreamWithTools(
             effectiveModel,
             chatMessages,
@@ -435,20 +466,26 @@ function ChatArea({
       if (!currentConversation) {
         const conv = await api.createConversation(effectiveModel);
         await api.addMessage(conv.id, "user", content);
+        const fullConv = await api.getConversation(conv.id);
+        onNewConversationCreated(fullConv);
+        onConversationListChange?.();
         const chatMessages = [{ role: "user", content }];
         api.chatStream(
           effectiveModel,
           chatMessages,
           (chunk) => setStreamingContent((prev) => prev + chunk),
           async (fullContent) => {
-            if (fullContent != null) {
+            if (fullContent && typeof fullContent === "object" && "error" in fullContent) {
+              setSendError(fullContent.error);
+            } else if (fullContent != null && typeof fullContent === "string") {
               await persistStreamedReply(conv.id, fullContent, true);
             } else {
               setSendError("Something went wrong. Please try again.");
             }
             clearSendingState();
             setAttachments([]);
-          }
+          },
+          { customProvider: customProviderForRequest ?? undefined }
         );
       } else {
         await api.addMessage(currentConversation.id, "user", content);
@@ -462,14 +499,17 @@ function ChatArea({
           history,
           (chunk) => setStreamingContent((prev) => prev + chunk),
           async (fullContent) => {
-            if (fullContent != null) {
+            if (fullContent && typeof fullContent === "object" && "error" in fullContent) {
+              setSendError(fullContent.error);
+            } else if (fullContent != null && typeof fullContent === "string") {
               await persistStreamedReply(currentConversation.id, fullContent, false);
             } else {
               setSendError("Something went wrong. Please try again.");
             }
             clearSendingState();
             setAttachments([]);
-          }
+          },
+          { customProvider: customProviderForRequest ?? undefined }
         );
       }
     } catch (e) {
@@ -539,22 +579,22 @@ function ChatArea({
 
           {modelOpen && (
             <div className="chat-area__model-dropdown" role="listbox" aria-label="Select model">
-              {models.length === 0 ? (
+              {combinedModelOptions.length === 0 ? (
                 <div className="chat-area__model-option chat-area__model-option--empty">No models available</div>
               ) : (
-                models.map((m) => (
+                combinedModelOptions.map((m) => (
                   <button
                     key={m.id}
-                    className={`chat-area__model-option${(m.id === effectiveModel || m.name === effectiveModel) ? " chat-area__model-option--active" : ""}`}
+                    className={`chat-area__model-option${m.id === effectiveModel ? " chat-area__model-option--active" : ""}`}
                     role="option"
-                    aria-selected={m.id === effectiveModel || m.name === effectiveModel}
-                    onClick={() => handleModelSelect(m.id || m.name)}
+                    aria-selected={m.id === effectiveModel}
+                    onClick={() => handleModelSelect(m.id)}
                     type="button"
                   >
                     <div className="chat-area__model-option-info">
                       <span className="chat-area__model-option-label">{m.name}</span>
                     </div>
-                    {(m.id === effectiveModel || m.name === effectiveModel) && (
+                    {m.id === effectiveModel && (
                       <svg className="chat-area__model-option-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                         <polyline points="20 6 9 17 4 12" />
                       </svg>
@@ -596,40 +636,136 @@ function ChatArea({
             <h2 id="chat-area__settings-title" className="chat-area__settings-modal-title">
               Settings
             </h2>
-            <div className="chat-area__settings-field">
-              <label htmlFor="chat-area__tool-call-model" className="chat-area__settings-label">
-                Model for tool calls
-              </label>
-              <select
-                id="chat-area__tool-call-model"
-                className="chat-area__settings-select"
-                value={toolCallModel ?? ""}
-                onChange={(e) => onToolCallModelChange?.(e.target.value === "" ? null : e.target.value)}
-                aria-label="Model for tool calls"
+            <div className="chat-area__settings-tabs" role="tablist" aria-label="Settings sections">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={settingsTab === "general"}
+                aria-controls="chat-area__settings-panel-general"
+                id="chat-area__settings-tab-general"
+                className={`chat-area__settings-tab${settingsTab === "general" ? " chat-area__settings-tab--active" : ""}`}
+                onClick={() => setSettingsTab("general")}
               >
-                <option value="">Same as conversation</option>
-                {models.map((m) => (
-                  <option key={m.id} value={m.id ?? m.name}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
-              <p className="chat-area__settings-hint">
-                Used for tool steps after your first reply when tools are enabled.
-              </p>
+                General
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={settingsTab === "custom-providers"}
+                aria-controls="chat-area__settings-panel-custom-providers"
+                id="chat-area__settings-tab-custom-providers"
+                className={`chat-area__settings-tab${settingsTab === "custom-providers" ? " chat-area__settings-tab--active" : ""}`}
+                onClick={() => setSettingsTab("custom-providers")}
+              >
+                Custom providers
+              </button>
             </div>
-            {toolCallModel && (
-              <div className="chat-area__settings-field">
-                <label className="chat-area__settings-checkbox-label">
+            {settingsTab === "general" && (
+              <div id="chat-area__settings-panel-general" role="tabpanel" aria-labelledby="chat-area__settings-tab-general" className="chat-area__settings-panel">
+                <div className="chat-area__settings-field">
+                  <label htmlFor="chat-area__tool-call-model" className="chat-area__settings-label">
+                    Model for tool calls
+                  </label>
+                  <select
+                    id="chat-area__tool-call-model"
+                    className="chat-area__settings-select"
+                    value={toolCallModel ?? ""}
+                    onChange={(e) => onToolCallModelChange?.(e.target.value === "" ? null : e.target.value)}
+                    aria-label="Model for tool calls"
+                  >
+                    <option value="">Same as conversation</option>
+                    {combinedModelOptions.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="chat-area__settings-hint">
+                    Used for tool steps after your first reply when tools are enabled.
+                  </p>
+                </div>
+                {toolCallModel && (
+                  <div className="chat-area__settings-field">
+                    <label className="chat-area__settings-checkbox-label">
+                      <input
+                        type="checkbox"
+                        className="chat-area__settings-checkbox"
+                        checked={useToolModelForFirstRound ?? false}
+                        onChange={(e) => onUseToolModelForFirstRoundChange?.(e.target.checked)}
+                        aria-label="Use tool-call model for first reply when tools are enabled"
+                      />
+                      <span>Use tool-call model for first reply when tools are enabled</span>
+                    </label>
+                  </div>
+                )}
+              </div>
+            )}
+            {settingsTab === "custom-providers" && (
+              <div id="chat-area__settings-panel-custom-providers" role="tabpanel" aria-labelledby="chat-area__settings-tab-custom-providers" className="chat-area__settings-panel">
+                <div className="chat-area__settings-field">
+                  <label htmlFor="chat-area__custom-provider-name" className="chat-area__settings-label">
+                    Provider name
+                  </label>
                   <input
-                    type="checkbox"
-                    className="chat-area__settings-checkbox"
-                    checked={useToolModelForFirstRound ?? false}
-                    onChange={(e) => onUseToolModelForFirstRoundChange?.(e.target.checked)}
-                    aria-label="Use tool-call model for first reply when tools are enabled"
+                    id="chat-area__custom-provider-name"
+                    type="text"
+                    className="chat-area__settings-input"
+                    placeholder="e.g. Google Gemini, OpenAI"
+                    value={customProviderName}
+                    onChange={(e) => setCustomProviderName(e.target.value)}
+                    aria-label="Provider name"
                   />
-                  <span>Use tool-call model for first reply when tools are enabled</span>
-                </label>
+                </div>
+                <div className="chat-area__settings-field">
+                  <label htmlFor="chat-area__custom-provider-key" className="chat-area__settings-label">
+                    API key
+                  </label>
+                  <input
+                    id="chat-area__custom-provider-key"
+                    type="password"
+                    className="chat-area__settings-input"
+                    placeholder="API key"
+                    value={customProviderKey}
+                    onChange={(e) => setCustomProviderKey(e.target.value)}
+                    aria-label="API key"
+                  />
+                </div>
+                <button
+                  type="button"
+                  className="chat-area__custom-provider-add"
+                  onClick={() => {
+                    const name = customProviderName.trim();
+                    const apiKey = customProviderKey.trim();
+                    if (!name || !apiKey || !onAddCustomProvider) return;
+                    onAddCustomProvider({ id: crypto.randomUUID(), name, apiKey });
+                    setCustomProviderName("");
+                    setCustomProviderKey("");
+                  }}
+                >
+                  Add
+                </button>
+                <div className="chat-area__custom-providers-list" aria-label="Custom providers">
+                  {customProviders.length === 0 ? (
+                    <p className="chat-area__custom-providers-empty">No custom providers yet.</p>
+                  ) : (
+                    customProviders.map((p) => (
+                      <div key={p.id} className="chat-area__custom-provider-item">
+                        <span className="chat-area__custom-provider-name">{p.name}</span>
+                        <button
+                          type="button"
+                          className="chat-area__custom-provider-remove"
+                          onClick={() => onRemoveCustomProvider?.(p.id)}
+                          aria-label={`Remove ${p.name}`}
+                        >
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <line x1="18" y1="6" x2="6" y2="18" />
+                            <line x1="6" y1="6" x2="18" y2="18" />
+                          </svg>
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
               </div>
             )}
             <button

@@ -22,6 +22,75 @@ dotenv.config({ path: join(__dirname, "..", ".env") });
 const app = express();
 const PORT = process.env.PORT || process.env.API_PORT || 3001;
 const OLLAMA_BASE = (process.env.OLLAMA_BASE_URL || "http://192.168.1.207:11434").replace(/\/$/, "");
+const GEMINI_STREAM_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent";
+
+function isGeminiProvider(name) {
+  if (!name || typeof name !== "string") return false;
+  const n = name.toLowerCase();
+  return n.includes("gemini") || n.includes("google");
+}
+
+function messagesToGeminiContents(messages) {
+  const contents = [];
+  for (const m of messages) {
+    const role = m.role === "assistant" ? "model" : "user";
+    const text = (m.content ?? m.text ?? "").trim();
+    if (!text) continue;
+    contents.push({ role, parts: [{ text }] });
+  }
+  return contents;
+}
+
+async function streamGeminiToNdjson(apiKey, messages, res) {
+  const contents = messagesToGeminiContents(messages);
+  const url = `${GEMINI_STREAM_URL}?key=${encodeURIComponent(apiKey)}&alt=sse`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ contents }),
+  });
+  if (!r.ok) {
+    const err = await r.text();
+    try {
+      const j = JSON.parse(err);
+      const msg = j.error?.message ?? err;
+      res.write(JSON.stringify({ done: true, error: msg }) + "\n");
+    } catch {
+      res.write(JSON.stringify({ done: true, error: err || "Gemini request failed" }) + "\n");
+    }
+    return;
+  }
+  if (!r.body) {
+    res.write(JSON.stringify({ done: true, error: "No response body" }) + "\n");
+    return;
+  }
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const dataMatch = line.startsWith("data: ") ? line.slice(6) : null;
+        if (!dataMatch || dataMatch === "[DONE]" || dataMatch.trim() === "") continue;
+        try {
+          const obj = JSON.parse(dataMatch);
+          const text = obj.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text && typeof text === "string") {
+            res.write(JSON.stringify({ response: text }) + "\n");
+          }
+        } catch (_) {}
+      }
+    }
+    res.write(JSON.stringify({ done: true }) + "\n");
+  } catch (e) {
+    res.write(JSON.stringify({ done: true, error: e.message || "Stream error" }) + "\n");
+  }
+}
 
 const BROWSE_WEB_INSTRUCTIONS = `Do NOT ask for confirmation between each step of multi-stage user requests. However, for ambiguous requests, you may ask for clarification (but do so sparingly).
 
@@ -370,10 +439,31 @@ app.post("/api/chat", async (req, res) => {
 
 app.post("/api/chat/stream", async (req, res) => {
   try {
-    const { model, messages } = req.body;
+    const { model, messages, customProvider } = req.body;
     if (!model || !Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: "model and messages array required" });
     }
+    const isCustom = typeof model === "string" && model.startsWith("custom:");
+    const provider = customProvider && typeof customProvider === "object" ? customProvider : null;
+    const apiKey = provider?.apiKey && typeof provider.apiKey === "string" ? provider.apiKey.trim() : "";
+    const providerName = provider?.name && typeof provider.name === "string" ? provider.name : "";
+
+    if (isCustom && apiKey && isGeminiProvider(providerName)) {
+      res.setHeader("Content-Type", "application/x-ndjson");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders?.();
+      await streamGeminiToNdjson(apiKey, messages, res);
+      return;
+    }
+
+    if (isCustom) {
+      const msg = providerName && !isGeminiProvider(providerName)
+        ? "Custom provider is not supported for chat yet. Only Gemini is supported."
+        : "Model not found. Add your API key in Settings > Custom providers and try again.";
+      return res.status(400).json({ error: msg });
+    }
+
     const r = await fetch(`${OLLAMA_BASE}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -427,6 +517,9 @@ app.post("/api/chat/stream-with-tools", async (req, res) => {
     const { model, messages, tools: toolsEnabled, toolNames, idempotencyKey, toolModel, useToolModelForFirstRound, attachmentIds: rawAttachmentIds } = req.body;
     if (!model || !Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: "model and messages array required" });
+    }
+    if (typeof model === "string" && model.startsWith("custom:")) {
+      return res.status(400).json({ error: "Tools are not supported with custom providers yet. Please disable tools to use Gemini." });
     }
     if (!toolsEnabled) {
       return res.status(400).json({ error: "tools: true required" });
@@ -665,7 +758,8 @@ app.post("/api/chat/stream-with-tools", async (req, res) => {
 app.post("/api/generate-title", async (req, res) => {
   try {
     const { userMessage, assistantMessage, model } = req.body;
-    const m = (model || "llama3.2").trim() || "llama3.2";
+    let m = (model || "llama3.2").trim() || "llama3.2";
+    if (m.startsWith("custom:")) m = "llama3.2";
     const system = "You are a titling assistant. Given the following first user message and assistant reply, respond with only a short conversation title (3-6 words) that describes the topic. No quotes or explanation.";
     const userContent = `User: ${userMessage || ""}\n\nAssistant: ${assistantMessage || ""}`;
     const messages = [

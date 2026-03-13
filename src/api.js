@@ -88,21 +88,33 @@ export async function chat(model, messages) {
  * Stream chat response from POST /api/chat/stream (NDJSON).
  * Calls onChunk(chunk) for each "response" fragment, then onDone(fullContent) when done.
  * If stream is unavailable or fails, calls onDone(null) so caller can fall back to api.chat().
+ * options.customProvider: { id, name, apiKey } when model is a custom provider (e.g. Gemini).
  */
-export async function chatStream(model, messages, onChunk, onDone) {
+export async function chatStream(model, messages, onChunk, onDone, options = {}) {
+  const { customProvider } = options;
   const url = BASE ? `${BASE}/api/chat/stream` : "/api/chat/stream";
+  const body = { model, messages };
+  if (customProvider && typeof customProvider === "object") {
+    body.customProvider = customProvider;
+  }
   let res;
   try {
     res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages }),
+      body: JSON.stringify(body),
     });
   } catch (e) {
     onDone(null);
     return;
   }
-  if (!res.ok || !res.body) {
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    const msg = err.error || res.statusText || "Request failed";
+    onDone({ error: msg });
+    return;
+  }
+  if (!res.body) {
     onDone(null);
     return;
   }
@@ -128,7 +140,7 @@ export async function chatStream(model, messages, onChunk, onDone) {
             onChunk(chunk);
           }
           if (obj.done) {
-            onDone(fullContent);
+            onDone(obj.error ? { error: obj.error } : fullContent);
             return;
           }
         } catch (_) {
@@ -176,7 +188,12 @@ export async function chatStreamWithTools(
     onDone?.(null);
     return;
   }
-  if (!res.ok || !res.body) {
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    onDone?.({ error: err.error || res.statusText });
+    return;
+  }
+  if (!res.body) {
     onDone?.(null);
     return;
   }

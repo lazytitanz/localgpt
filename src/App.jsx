@@ -32,6 +32,41 @@ function App() {
   const [useToolModelForFirstRound, setUseToolModelForFirstRoundState] = useState(
     () => localStorage.getItem("localgpt.useToolModelForFirstRound") === "true"
   );
+  const [customProviders, setCustomProviders] = useState(() => {
+    try {
+      const raw = localStorage.getItem("localgpt.customProviders");
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const addCustomProvider = useCallback((provider) => {
+    setCustomProviders((prev) => {
+      const next = [...prev, provider];
+      localStorage.setItem("localgpt.customProviders", JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  const removeCustomProvider = useCallback((id) => {
+    setCustomProviders((prev) => {
+      const next = prev.filter((p) => p.id !== id);
+      localStorage.setItem("localgpt.customProviders", JSON.stringify(next));
+      return next;
+    });
+    const customId = `custom:${id}`;
+    setSelectedModel((m) => (m === customId ? null : m));
+    setToolCallModelState((m) => {
+      if (m === customId) {
+        localStorage.removeItem("localgpt.toolCallModel");
+        return null;
+      }
+      return m;
+    });
+  }, []);
 
   const onToolCallModelChange = useCallback((value) => {
     setToolCallModelState(value);
@@ -129,6 +164,9 @@ function App() {
           onToolCallModelChange={onToolCallModelChange}
           useToolModelForFirstRound={useToolModelForFirstRound}
           onUseToolModelForFirstRoundChange={onUseToolModelForFirstRoundChange}
+          customProviders={customProviders}
+          onAddCustomProvider={addCustomProvider}
+          onRemoveCustomProvider={removeCustomProvider}
           onSendSuccess={handleRefreshCurrent}
           onNewConversationCreated={setCurrentConversation}
           onConversationListChange={handleRefreshList}
